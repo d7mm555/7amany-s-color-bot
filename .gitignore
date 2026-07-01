@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.claude/
+server_config.json
+server_config.local.json

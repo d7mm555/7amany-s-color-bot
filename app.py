@@ -1,0 +1,558 @@
+"""7amany's Color-Bot — control window.
+
+Pick a target color (eyedropper or palette), select a screen region, and the app left-clicks
+the color repeatedly while it stays visible in that region (Start/Stop), or locks the cursor onto
+it without clicking (Lock). Emergency stop: F8 (works even when this window isn't focused). A
+custom key can also be bound to toggle Start/Stop.
+
+Requires a redeemed token before Start/Lock will run — see TOKENS.md for the cloud-side setup.
+"""
+
+import ctypes
+
+# Make the process DPI-aware BEFORE creating any Tk window, so that the pixels mss captures
+# line up 1:1 with the coordinates pynput clicks (otherwise clicks drift on scaled displays).
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor v2
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+import colorsys
+import tkinter as tk
+import tkinter.font as tkfont
+from tkinter import colorchooser
+
+from pynput import keyboard
+
+import licensing
+import overlays
+from worker import ClickWorker
+
+APP_NAME = "7amany's Color-Bot"
+
+# ----- theme -----
+BG = "#0b0b0f"
+PANEL_BG = "#151318"
+BORDER = "#2a2530"
+PURPLE = "#a855f7"
+PURPLE_BRIGHT = "#c084fc"
+PURPLE_DARK = "#5b21b6"
+PURPLE_DARKER = "#3b0764"
+TEXT = "#f1f1f1"
+TEXT_MUTED = "#8a8a93"
+RED = "#f87171"
+
+
+def hexcolor(rgb):
+    return "#%02X%02X%02X" % tuple(int(c) for c in rgb)
+
+
+def make_button(parent, text, command, big=False):
+    btn = tk.Button(
+        parent, text=text, command=command,
+        bg=PURPLE_DARK, fg=TEXT, activebackground=PURPLE, activeforeground=TEXT,
+        disabledforeground=TEXT_MUTED, relief="flat", bd=0, cursor="hand2",
+        font=("Segoe UI", 12 if big else 9, "bold"),
+        padx=24 if big else 12, pady=10 if big else 6,
+        highlightthickness=0,
+    )
+
+    def on_enter(_e):
+        if btn["state"] != "disabled":
+            btn.config(bg=PURPLE)
+
+    def on_leave(_e):
+        if btn["state"] != "disabled":
+            btn.config(bg=PURPLE_DARK)
+
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+    return btn
+
+
+def set_button_enabled(btn, enabled):
+    btn.config(state="normal" if enabled else "disabled",
+               bg=PURPLE_DARK if enabled else BORDER,
+               fg=TEXT if enabled else TEXT_MUTED)
+
+
+def key_label(key):
+    if key is None:
+        return "None"
+    if isinstance(key, keyboard.KeyCode):
+        return (key.char or f"<{key.vk}>").upper()
+    return str(key).replace("Key.", "").upper()
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.color = None                 # (r, g, b)
+        self.region = None                # {left, top, width, height}
+        self.worker = ClickWorker(on_status=self._status_from_thread)
+        self._countdown_job = None
+        self._splash_anim_job = None
+        self._active_mode = None          # None | "click" | "track"
+        self._is_fullscreen = False
+        self.bound_key = None
+        self._awaiting_bind = False
+        self.licensed = licensing.is_licensed()
+
+        root.title(APP_NAME)
+        root.configure(bg=BG)
+        root.attributes("-topmost", True)
+        root.resizable(False, False)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.bind("<F11>", lambda e: self.toggle_fullscreen())
+        root.bind("<Escape>", lambda e: self._exit_fullscreen())
+
+        self.splash_frame = tk.Frame(root, bg=BG)
+        self.main_frame = tk.Frame(root, bg=BG)
+
+        self._build_splash(self.splash_frame)
+        self._build_main(self.main_frame)
+        self._update_token_visibility()
+
+        self._show_splash()
+
+        # Global F8 hotkey — stop even when this window isn't focused. Also captures the
+        # next keypress when a keybind is being recorded, and fires the bound hotkey.
+        self._listener = keyboard.Listener(on_press=self._on_key)
+        self._listener.daemon = True
+        self._listener.start()
+
+    # ----- splash screen -----
+    def _build_splash(self, parent):
+        title_text = APP_NAME
+        font = tkfont.Font(family="Segoe UI", size=22, weight="bold")
+        widths = [font.measure(ch) for ch in title_text]
+        total_width = sum(widths)
+        canvas_w = max(total_width + 60, 420)
+        canvas_h = 90
+
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(padx=50, pady=(50, 40))
+
+        canvas = tk.Canvas(outer, width=canvas_w, height=canvas_h, bg=BG, highlightthickness=0, bd=0)
+        canvas.pack()
+
+        x = (canvas_w - total_width) // 2
+        y = canvas_h // 2
+        self._title_chars = []
+        for ch, w in zip(title_text, widths):
+            item = canvas.create_text(x, y, text=ch, font=font, fill=TEXT, anchor="w")
+            self._title_chars.append(item)
+            x += w
+        self.splash_canvas = canvas
+
+        subtitle = tk.Label(outer, text="color-triggered auto-clicker", bg=BG, fg=TEXT_MUTED,
+                            font=("Segoe UI", 9))
+        subtitle.pack(pady=(4, 26))
+
+        start_btn = make_button(outer, "Start", self._enter_main, big=True)
+        start_btn.pack()
+
+        self._hue_phase = 0.0
+
+    def _show_splash(self):
+        self.main_frame.pack_forget()
+        self.splash_frame.pack(fill="both", expand=True)
+        self._animate_rainbow()
+        self.root.update_idletasks()
+        self._center_window()
+
+    def _animate_rainbow(self):
+        self._hue_phase = (self._hue_phase + 0.006) % 1.0
+        for i, item in enumerate(self._title_chars):
+            hue = (self._hue_phase + i * 0.045) % 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+            color = "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+            self.splash_canvas.itemconfig(item, fill=color)
+        self._splash_anim_job = self.root.after(40, self._animate_rainbow)
+
+    def _enter_main(self):
+        if self._splash_anim_job is not None:
+            self.root.after_cancel(self._splash_anim_job)
+            self._splash_anim_job = None
+        # Swap frames without moving the window during the click itself — repositioning here
+        # would shift window content under the pointer while the OS click is still in flight,
+        # letting the release land on whatever is now underneath (e.g. a slider).
+        self.splash_frame.pack_forget()
+        self.main_frame.pack(fill="both", expand=True)
+
+    def _back_to_splash(self):
+        self.stop()  # don't leave a click/lock loop running invisibly behind the splash
+        self.main_frame.pack_forget()
+        self.splash_frame.pack(fill="both", expand=True)
+        self._animate_rainbow()
+
+    def _center_window(self):
+        w = self.root.winfo_reqwidth()
+        h = self.root.winfo_reqheight()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self.root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 3}")
+
+    # ----- fullscreen -----
+    def toggle_fullscreen(self):
+        self._is_fullscreen = not self._is_fullscreen
+        self.root.attributes("-fullscreen", self._is_fullscreen)
+
+    def _exit_fullscreen(self):
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+            self.root.attributes("-fullscreen", False)
+
+    # ----- main control panel -----
+    def _build_main(self, parent):
+        pad = {"padx": 10, "pady": 6}
+
+        header = tk.Frame(parent, bg=BG)
+        header.pack(fill="x", padx=16, pady=(14, 0))
+        tk.Label(header, text=APP_NAME, bg=BG, fg=PURPLE_BRIGHT,
+                font=("Segoe UI", 13, "bold")).pack(side="left")
+        make_button(header, "Fullscreen (F11)", self.toggle_fullscreen).pack(side="right")
+
+        card = tk.Frame(parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="both", expand=True, padx=16, pady=14)
+        frm = tk.Frame(card, bg=PANEL_BG)
+        frm.pack(padx=14, pady=12)
+
+        # --- Color row ---
+        tk.Label(frm, text="Target color", bg=PANEL_BG, fg=TEXT, font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", **pad)
+        self.swatch = tk.Label(frm, width=6, height=2, bg="#DDDDDD", bd=0,
+                               highlightthickness=2, highlightbackground=PURPLE)
+        self.swatch.grid(row=1, column=0, **pad)
+        self.color_var = tk.StringVar(value="not set")
+        tk.Label(frm, textvariable=self.color_var, bg=PANEL_BG, fg=TEXT_MUTED, width=18, anchor="w"
+                ).grid(row=1, column=1, sticky="w", **pad)
+        btns = tk.Frame(frm, bg=PANEL_BG)
+        btns.grid(row=1, column=2, sticky="w", **pad)
+        make_button(btns, "Eyedropper", self.pick_eyedropper).grid(row=0, column=0, padx=2)
+        make_button(btns, "Palette…", self.pick_palette).grid(row=0, column=1, padx=2)
+
+        # --- Region row ---
+        tk.Label(frm, text="Scan region", bg=PANEL_BG, fg=TEXT, font=("Segoe UI", 10, "bold")).grid(
+            row=2, column=0, columnspan=3, sticky="w", **pad)
+        self.region_var = tk.StringVar(value="not set")
+        tk.Label(frm, textvariable=self.region_var, bg=PANEL_BG, fg=TEXT_MUTED, width=26, anchor="w"
+                ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+        make_button(frm, "Select region…", self.pick_region).grid(row=3, column=2, sticky="w", **pad)
+
+        # --- Tolerance ---
+        self.tol_var = tk.IntVar(value=30)
+        tk.Label(frm, text="Color tolerance", bg=PANEL_BG, fg=TEXT).grid(row=4, column=0, sticky="w", **pad)
+        self._make_scale(frm, 0, 150, self.tol_var).grid(row=4, column=1, sticky="ew", **pad)
+        self.tol_lbl = tk.Label(frm, width=4, bg=PANEL_BG, fg=TEXT)
+        self.tol_lbl.grid(row=4, column=2, sticky="w", **pad)
+
+        # --- Click interval ---
+        self.interval_var = tk.IntVar(value=200)
+        tk.Label(frm, text="Click interval (ms)", bg=PANEL_BG, fg=TEXT).grid(row=5, column=0, sticky="w", **pad)
+        self._make_scale(frm, 50, 1000, self.interval_var).grid(row=5, column=1, sticky="ew", **pad)
+        self.int_lbl = tk.Label(frm, width=5, bg=PANEL_BG, fg=TEXT)
+        self.int_lbl.grid(row=5, column=2, sticky="w", **pad)
+
+        # --- Start delay ---
+        self.delay_var = tk.IntVar(value=3)
+        tk.Label(frm, text="Start delay (s)", bg=PANEL_BG, fg=TEXT).grid(row=6, column=0, sticky="w", **pad)
+        self._make_scale(frm, 0, 10, self.delay_var).grid(row=6, column=1, sticky="ew", **pad)
+        self.delay_lbl = tk.Label(frm, width=4, bg=PANEL_BG, fg=TEXT)
+        self.delay_lbl.grid(row=6, column=2, sticky="w", **pad)
+
+        # --- Start / Stop ---
+        actions = tk.Frame(frm, bg=PANEL_BG)
+        actions.grid(row=7, column=0, columnspan=3, pady=(10, 4))
+        self.start_btn = make_button(actions, "▶  Start", self.start)
+        self.start_btn.grid(row=0, column=0, padx=6)
+        self.stop_btn = make_button(actions, "■  Stop (F8)", self.stop)
+        self.stop_btn.grid(row=0, column=1, padx=6)
+        set_button_enabled(self.stop_btn, False)
+
+        # --- Bind (custom hotkey that toggles Start/Stop) ---
+        self.bind_btn = tk.Button(
+            frm, text="Bind: None", command=self._start_bind_capture,
+            bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+        )
+        self.bind_btn.grid(row=8, column=0, columnspan=3, pady=(2, 8))
+
+        # --- Lock ---
+        self.lock_btn = tk.Button(
+            frm, text="Lock: OFF", command=self._toggle_lock,
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=8,
+        )
+        self.lock_btn.grid(row=9, column=0, columnspan=3, pady=(0, 4))
+
+        # --- Offset (Lock only) ---
+        self.offset_var = tk.DoubleVar(value=0.0)
+        tk.Label(frm, text="Offset (cm)", bg=PANEL_BG, fg=TEXT).grid(row=10, column=0, sticky="w", **pad)
+        self._make_scale(frm, -0.6, 0.6, self.offset_var, resolution=0.01).grid(
+            row=10, column=1, sticky="ew", **pad)
+        self.offset_lbl = tk.Label(frm, width=6, bg=PANEL_BG, fg=TEXT)
+        self.offset_lbl.grid(row=10, column=2, sticky="w", **pad)
+
+        # --- Token ---
+        self.token_frame = tk.Frame(frm, bg=PANEL_BG)
+        self.token_frame.grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 0), padx=10)
+        tk.Label(self.token_frame, text="Enter Token", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(0, 8))
+        self.token_var = tk.StringVar()
+        tk.Entry(self.token_frame, textvariable=self.token_var, bg="white", fg="black",
+                 relief="flat", width=22, insertbackground="black").pack(side="left")
+        self.token_error_var = tk.StringVar(value="")
+        self.token_error_lbl = tk.Label(frm, textvariable=self.token_error_var, bg=PANEL_BG, fg=RED,
+                                        font=("Segoe UI", 9, "bold"))
+        self.token_error_lbl.grid(row=12, column=0, columnspan=3, sticky="w", padx=10)
+
+        # --- Status ---
+        self.status_var = tk.StringVar(value="Set a color and a region, then Start.")
+        sep = tk.Frame(frm, bg=BORDER, height=1)
+        sep.grid(row=13, column=0, columnspan=3, sticky="ew", pady=6)
+        self.status_lbl = tk.Label(frm, textvariable=self.status_var, bg=PANEL_BG, fg=PURPLE_BRIGHT,
+                                   width=40, anchor="w", justify="left")
+        self.status_lbl.grid(row=14, column=0, columnspan=3, sticky="w", **pad)
+        tk.Label(frm, text="Emergency stop: F8  (global)", bg=PANEL_BG, fg=TEXT_MUTED).grid(
+            row=15, column=0, columnspan=3, sticky="w", padx=10)
+
+        footer = tk.Frame(parent, bg=BG)
+        footer.pack(fill="x", padx=16, pady=(0, 14))
+        make_button(footer, "← Back", self._back_to_splash).pack(side="left")
+
+        self._sync_labels()
+        self._refresh_buttons()
+
+    def _make_scale(self, parent, lo, hi, var, resolution=1):
+        return tk.Scale(
+            parent, from_=lo, to=hi, variable=var, orient="horizontal", resolution=resolution,
+            command=lambda e: self._sync_labels(),
+            bg=PANEL_BG, fg=TEXT, troughcolor=PURPLE_DARKER, activebackground=PURPLE,
+            highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False,
+        )
+
+    # ----- helpers -----
+    def _sync_labels(self):
+        self.tol_lbl.config(text=str(self.tol_var.get()))
+        self.int_lbl.config(text=f"{self.interval_var.get()}")
+        self.delay_lbl.config(text=str(self.delay_var.get()))
+        self.offset_lbl.config(text=f"{self.offset_var.get():+.2f}")
+
+    def _hide_self(self):
+        """Make the control window invisible so it isn't captured in overlay screenshots."""
+        self.root.attributes("-alpha", 0.0)
+        self.root.update()
+        self.root.after(60)  # let the compositor hide it before we grab the screen
+
+    def _show_self(self):
+        self.root.attributes("-alpha", 1.0)
+
+    def _px_per_cm(self):
+        return self.root.winfo_fpixels("1c")
+
+    def _status_from_thread(self, msg):
+        # Called from the worker/hotkey threads — marshal onto the Tk main thread.
+        self.root.after(0, lambda: self._set_status(msg))
+        self.root.after(0, self._refresh_buttons)
+
+    def _set_status(self, msg):
+        self.status_var.set(msg)
+        self.status_lbl.config(fg=RED if msg.startswith("Error") else PURPLE_BRIGHT)
+
+    def _refresh_buttons(self):
+        countdown_active = self._countdown_job is not None
+        running = self.worker.is_running() or countdown_active
+        click_active = running and self._active_mode == "click"
+        track_active = running and self._active_mode == "track"
+
+        set_button_enabled(self.start_btn, not running)
+        set_button_enabled(self.stop_btn, click_active)
+
+        if click_active:
+            self.lock_btn.config(state="disabled", bg=BORDER, fg=TEXT_MUTED, text="Lock: OFF")
+        elif track_active:
+            self.lock_btn.config(state="normal", bg=PURPLE, fg=TEXT, text="Lock: ON")
+        else:
+            self.lock_btn.config(state="normal", bg=PURPLE_DARK, fg=TEXT, text="Lock: OFF")
+
+    def _on_key(self, key):
+        if self._awaiting_bind:
+            if key == keyboard.Key.esc:
+                self.root.after(0, self._cancel_bind_capture)
+            else:
+                self.root.after(0, lambda: self._finish_bind(key))
+            return
+        if key == keyboard.Key.esc:
+            # Route through the global listener rather than relying solely on the Tk <Escape>
+            # binding — that binding needs a focused Tk widget, which a borderless fullscreen
+            # window doesn't reliably have, so Escape could silently do nothing.
+            self.root.after(0, self._exit_fullscreen)
+            return
+        if key == keyboard.Key.f8:
+            self.root.after(0, self.stop)
+            return
+        if self.bound_key is not None and key == self.bound_key:
+            self.root.after(0, self._toggle_run)
+
+    # ----- keybind -----
+    def _start_bind_capture(self):
+        self._awaiting_bind = True
+        self.bind_btn.config(text="Select key…")
+
+    def _cancel_bind_capture(self):
+        self._awaiting_bind = False
+        self.bind_btn.config(text=f"Bind: {key_label(self.bound_key)}")
+
+    def _finish_bind(self, key):
+        self._awaiting_bind = False
+        self.bound_key = key
+        self.bind_btn.config(text=f"Bind: {key_label(key)}")
+
+    def _toggle_run(self):
+        if self.worker.is_running() or self._countdown_job is not None:
+            self.stop()
+        else:
+            self.start()
+
+    # ----- color / region pickers -----
+    def _set_color(self, rgb):
+        self.color = tuple(int(c) for c in rgb)
+        hexc = hexcolor(self.color)
+        self.swatch.config(bg=hexc)
+        self.color_var.set(f"{hexc}  ({self.color[0]},{self.color[1]},{self.color[2]})")
+
+    def pick_eyedropper(self):
+        self._hide_self()
+        try:
+            color = overlays.pick_color(self.root)
+        finally:
+            self._show_self()
+        if color:
+            self._set_color(color)
+            self._set_status("Color picked with eyedropper.")
+
+    def pick_palette(self):
+        initial = hexcolor(self.color) if self.color else "#FF0000"
+        rgb, _hexc = colorchooser.askcolor(color=initial, parent=self.root, title="Pick target color")
+        if rgb:
+            self._set_color(rgb)
+            self._set_status("Color picked from palette.")
+
+    def pick_region(self):
+        self._hide_self()
+        try:
+            region = overlays.select_region(self.root)
+        finally:
+            self._show_self()
+        if region:
+            self.region = region
+            self.region_var.set(
+                f"{region['width']}×{region['height']} @ ({region['left']},{region['top']})")
+            self._set_status("Region selected.")
+
+    # ----- licensing -----
+    def _update_token_visibility(self):
+        if self.licensed:
+            self.token_frame.grid_remove()
+            self.token_error_lbl.grid_remove()
+        else:
+            self.token_frame.grid()
+            self.token_error_lbl.grid()
+
+    def _check_license_or_warn(self):
+        if self.licensed:
+            return True
+        token = self.token_var.get().strip()
+        if token:
+            self._set_status("Checking token…")
+            self.root.update_idletasks()
+            ok, _msg = licensing.redeem_token(token)
+            if ok:
+                self.licensed = True
+                self.token_error_var.set("")
+                self._update_token_visibility()
+                self._set_status("Token accepted.")
+                return True
+        self.token_error_var.set("You Must Enter A Valid Token First")
+        return False
+
+    # ----- start / stop (click mode) -----
+    def start(self):
+        if not self._check_license_or_warn():
+            return
+        if self.color is None:
+            self._set_status("Pick a target color first.")
+            return
+        if self.region is None:
+            self._set_status("Select a scan region first.")
+            return
+        delay = self.delay_var.get()
+        if delay > 0:
+            self._countdown(delay)
+        else:
+            self._launch()
+        self._refresh_buttons()
+
+    def _countdown(self, remaining):
+        if remaining <= 0:
+            self._countdown_job = None
+            self._launch()
+            return
+        self._set_status(f"Starting in {remaining}…  (Stop/F8 to cancel)")
+        self._countdown_job = self.root.after(1000, lambda: self._countdown(remaining - 1))
+
+    def _launch(self):
+        self._active_mode = "click"
+        self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
+                          mode="click")
+        self._refresh_buttons()
+
+    def stop(self):
+        if self._countdown_job is not None:
+            self.root.after_cancel(self._countdown_job)
+            self._countdown_job = None
+            self._set_status("Cancelled before start.")
+        self.worker.stop()
+        self._active_mode = None
+        self._refresh_buttons()
+
+    # ----- lock (track mode) -----
+    def _toggle_lock(self):
+        if self._active_mode == "track" and self.worker.is_running():
+            self.stop()
+            return
+        if self.worker.is_running() or self._countdown_job is not None:
+            return  # click mode busy; button should be disabled anyway
+        if not self._check_license_or_warn():
+            return
+        if self.color is None:
+            self._set_status("Pick a target color first.")
+            return
+        if self.region is None:
+            self._set_status("Select a scan region first.")
+            return
+        offset_px = int(round(self.offset_var.get() * self._px_per_cm()))
+        self._active_mode = "track"
+        self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
+                          mode="track", offset_px=offset_px)
+        self._refresh_buttons()
+
+    def on_close(self):
+        self.worker.stop()
+        try:
+            self._listener.stop()
+        except Exception:
+            pass
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
