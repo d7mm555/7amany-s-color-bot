@@ -21,6 +21,7 @@ except Exception:
         pass
 
 import colorsys
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import colorchooser
@@ -29,6 +30,7 @@ from pynput import keyboard
 
 import licensing
 import overlays
+import updater
 from worker import ClickWorker
 
 APP_NAME = "7amany's Color-Bot"
@@ -100,6 +102,7 @@ class App:
         self.bound_key = None
         self._awaiting_bind = False
         self.licensed = licensing.is_licensed()
+        self.update_available = False
 
         root.title(APP_NAME)
         root.configure(bg=BG)
@@ -117,6 +120,7 @@ class App:
         self._update_token_visibility()
 
         self._show_splash()
+        self._check_for_updates_async()
 
         # Global F8 hotkey — stop even when this window isn't focused. Also captures the
         # next keypress when a keybind is being recorded, and fires the bound hotkey.
@@ -215,6 +219,8 @@ class App:
         tk.Label(header, text=APP_NAME, bg=BG, fg=PURPLE_BRIGHT,
                 font=("Segoe UI", 13, "bold")).pack(side="left")
         make_button(header, "Fullscreen (F11)", self.toggle_fullscreen).pack(side="right")
+        self.update_btn = make_button(header, "⭯ Update", self._do_update)
+        # hidden until a newer VERSION is found on GitHub, see _on_update_check_result
 
         card = tk.Frame(parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
         card.pack(fill="both", expand=True, padx=16, pady=14)
@@ -273,32 +279,9 @@ class App:
         self.stop_btn.grid(row=0, column=1, padx=6)
         set_button_enabled(self.stop_btn, False)
 
-        # --- Bind (custom hotkey that toggles Start/Stop) ---
-        self.bind_btn = tk.Button(
-            frm, text="Bind: None", command=self._start_bind_capture,
-            bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
-            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
-        )
-        self.bind_btn.grid(row=8, column=0, columnspan=3, pady=(2, 8))
-
-        # --- Lock ---
-        self.lock_btn = tk.Button(
-            frm, text="Lock: OFF", command=self._toggle_lock,
-            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=8,
-        )
-        self.lock_btn.grid(row=9, column=0, columnspan=3, pady=(0, 4))
-
-        # --- Offset (Lock only) ---
-        self.offset_var = tk.DoubleVar(value=0.0)
-        tk.Label(frm, text="Offset (cm)", bg=PANEL_BG, fg=TEXT).grid(row=10, column=0, sticky="w", **pad)
-        self._make_scale(frm, -0.6, 0.6, self.offset_var, resolution=0.01).grid(
-            row=10, column=1, sticky="ew", **pad)
-        self.offset_lbl = tk.Label(frm, width=6, bg=PANEL_BG, fg=TEXT)
-        self.offset_lbl.grid(row=10, column=2, sticky="w", **pad)
-
-        # --- Token ---
+        # --- Token (shown right below Start/Stop until a token is redeemed) ---
         self.token_frame = tk.Frame(frm, bg=PANEL_BG)
-        self.token_frame.grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 0), padx=10)
+        self.token_frame.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=10)
         tk.Label(self.token_frame, text="Enter Token", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(0, 8))
         self.token_var = tk.StringVar()
         tk.Entry(self.token_frame, textvariable=self.token_var, bg="white", fg="black",
@@ -306,7 +289,30 @@ class App:
         self.token_error_var = tk.StringVar(value="")
         self.token_error_lbl = tk.Label(frm, textvariable=self.token_error_var, bg=PANEL_BG, fg=RED,
                                         font=("Segoe UI", 9, "bold"))
-        self.token_error_lbl.grid(row=12, column=0, columnspan=3, sticky="w", padx=10)
+        self.token_error_lbl.grid(row=9, column=0, columnspan=3, sticky="w", padx=10)
+
+        # --- Bind (custom hotkey that toggles Start/Stop) ---
+        self.bind_btn = tk.Button(
+            frm, text="Bind: None", command=self._start_bind_capture,
+            bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+        )
+        self.bind_btn.grid(row=10, column=0, columnspan=3, pady=(10, 8))
+
+        # --- Lock ---
+        self.lock_btn = tk.Button(
+            frm, text="Lock: OFF", command=self._toggle_lock,
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=8,
+        )
+        self.lock_btn.grid(row=11, column=0, columnspan=3, pady=(0, 4))
+
+        # --- Offset (Lock only) ---
+        self.offset_var = tk.DoubleVar(value=0.0)
+        tk.Label(frm, text="Offset (cm)", bg=PANEL_BG, fg=TEXT).grid(row=12, column=0, sticky="w", **pad)
+        self._make_scale(frm, -0.6, 0.6, self.offset_var, resolution=0.01).grid(
+            row=12, column=1, sticky="ew", **pad)
+        self.offset_lbl = tk.Label(frm, width=6, bg=PANEL_BG, fg=TEXT)
+        self.offset_lbl.grid(row=12, column=2, sticky="w", **pad)
 
         # --- Status ---
         self.status_var = tk.StringVar(value="Set a color and a region, then Start.")
@@ -454,46 +460,118 @@ class App:
 
     # ----- licensing -----
     def _update_token_visibility(self):
+        # The error label stays gridded even once licensed -- it's also used to show
+        # "Update Required", which can apply regardless of license state.
         if self.licensed:
             self.token_frame.grid_remove()
-            self.token_error_lbl.grid_remove()
         else:
             self.token_frame.grid()
-            self.token_error_lbl.grid()
 
-    def _check_license_or_warn(self):
+    def _require_license(self, on_success):
+        """If already licensed, run on_success() right away. Otherwise redeem the entered
+        token in a background thread (so the network call can't freeze the UI) and only run
+        on_success() if it's accepted."""
         if self.licensed:
-            return True
+            on_success()
+            return
         token = self.token_var.get().strip()
-        if token:
-            self._set_status("Checking token…")
-            self.root.update_idletasks()
+        if not token:
+            self.token_error_var.set("You Must Enter A Token First")
+            return
+        self.token_error_var.set("")
+        self._set_status("Checking token…")
+        set_button_enabled(self.start_btn, False)
+        self.lock_btn.config(state="disabled")
+
+        def check():
             ok, _msg = licensing.redeem_token(token)
-            if ok:
-                self.licensed = True
-                self.token_error_var.set("")
-                self._update_token_visibility()
-                self._set_status("Token accepted.")
-                return True
-        self.token_error_var.set("You Must Enter A Valid Token First")
-        return False
+            self.root.after(0, lambda: self._on_license_result(ok, on_success))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_license_result(self, ok, on_success):
+        if ok:
+            self.licensed = True
+            self.token_error_var.set("")
+            self._update_token_visibility()
+            self._set_status("Token accepted.")
+            self._refresh_buttons()
+            on_success()
+        else:
+            self.token_error_var.set("Invalid Token")
+            self._set_status("Set a color and a region, then Start.")
+            self._refresh_buttons()
+
+    # ----- self-update -----
+    def _check_for_updates_async(self):
+        def check():
+            available, latest, err = updater.check_for_update()
+            self.root.after(0, lambda: self._on_update_check_result(available, latest, err))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_update_check_result(self, available, latest, err):
+        if err:
+            return  # network hiccup -- stay silent, don't block using the app
+        self.update_available = available
+        if available:
+            self.update_btn.pack(side="right", padx=(0, 8))
+            self._set_status(f"Update available (v{latest}). Click Update to install.")
+        else:
+            self.update_btn.pack_forget()
+
+    def _do_update(self):
+        if not self.update_available:
+            return
+        set_button_enabled(self.update_btn, False)
+        set_button_enabled(self.start_btn, False)
+        self.lock_btn.config(state="disabled")
+        self._set_status("Downloading update…")
+
+        def work():
+            ok, err = updater.download_update()
+            self.root.after(0, lambda: self._on_update_download_result(ok, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_download_result(self, ok, err):
+        if ok:
+            self._set_status("Update installed. Restarting…")
+            self.root.after(400, self._restart_now)
+        else:
+            set_button_enabled(self.update_btn, True)
+            self._refresh_buttons()
+            self._set_status(f"Error: {err}")
+
+    def _restart_now(self):
+        self.worker.stop()
+        try:
+            self._listener.stop()
+        except Exception:
+            pass
+        updater.restart_app()
 
     # ----- start / stop (click mode) -----
     def start(self):
-        if not self._check_license_or_warn():
+        if self.update_available:
+            self.token_error_var.set("Update Required")
             return
-        if self.color is None:
-            self._set_status("Pick a target color first.")
-            return
-        if self.region is None:
-            self._set_status("Select a scan region first.")
-            return
-        delay = self.delay_var.get()
-        if delay > 0:
-            self._countdown(delay)
-        else:
-            self._launch()
-        self._refresh_buttons()
+
+        def proceed():
+            if self.color is None:
+                self._set_status("Pick a target color first.")
+                return
+            if self.region is None:
+                self._set_status("Select a scan region first.")
+                return
+            delay = self.delay_var.get()
+            if delay > 0:
+                self._countdown(delay)
+            else:
+                self._launch()
+            self._refresh_buttons()
+
+        self._require_license(proceed)
 
     def _countdown(self, remaining):
         if remaining <= 0:
@@ -525,19 +603,24 @@ class App:
             return
         if self.worker.is_running() or self._countdown_job is not None:
             return  # click mode busy; button should be disabled anyway
-        if not self._check_license_or_warn():
+        if self.update_available:
+            self.token_error_var.set("Update Required")
             return
-        if self.color is None:
-            self._set_status("Pick a target color first.")
-            return
-        if self.region is None:
-            self._set_status("Select a scan region first.")
-            return
-        offset_px = int(round(self.offset_var.get() * self._px_per_cm()))
-        self._active_mode = "track"
-        self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
-                          mode="track", offset_px=offset_px)
-        self._refresh_buttons()
+
+        def proceed():
+            if self.color is None:
+                self._set_status("Pick a target color first.")
+                return
+            if self.region is None:
+                self._set_status("Select a scan region first.")
+                return
+            offset_px = int(round(self.offset_var.get() * self._px_per_cm()))
+            self._active_mode = "track"
+            self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
+                              mode="track", offset_px=offset_px)
+            self._refresh_buttons()
+
+        self._require_license(proceed)
 
     def on_close(self):
         self.worker.stop()
