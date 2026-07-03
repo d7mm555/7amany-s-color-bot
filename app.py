@@ -303,8 +303,20 @@ class App:
                  ).grid(row=1, column=1, sticky="ew")
         self.center_color_swatch = tk.Label(self.center_frame, width=3, bg="#FF0000")
         self.center_color_swatch.grid(row=1, column=2, sticky="w", padx=(6, 0))
+        # Aim strength: relative-move gain used by Lock in Center mode (games). Higher = snappier
+        # but more likely to overshoot; tune per game.
+        self.aim_sens_var = tk.DoubleVar(value=0.3)
+        tk.Label(self.center_frame, text="Aim strength", bg=PANEL_BG, fg=TEXT).grid(
+            row=2, column=0, sticky="w", padx=(0, 8))
+        tk.Scale(self.center_frame, from_=0.05, to=1.0, variable=self.aim_sens_var, resolution=0.05,
+                 orient="horizontal", command=lambda _v: self._apply_center_options(),
+                 bg=PANEL_BG, fg=TEXT, troughcolor=PURPLE_DARKER, activebackground=PURPLE,
+                 highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False, length=160
+                 ).grid(row=2, column=1, sticky="ew")
+        self.aim_sens_lbl = tk.Label(self.center_frame, width=4, bg=PANEL_BG, fg=TEXT)
+        self.aim_sens_lbl.grid(row=2, column=2, sticky="w", padx=(6, 0))
         self.hide_ch_btn = make_button(self.center_frame, "Hide crosshair", self._toggle_crosshair_visible)
-        self.hide_ch_btn.grid(row=2, column=0, columnspan=3, pady=(4, 2))
+        self.hide_ch_btn.grid(row=3, column=0, columnspan=3, pady=(4, 2))
         self.center_frame.grid_remove()
 
         # --- Tolerance ---
@@ -671,6 +683,7 @@ class App:
         size = self.center_size_var.get()
         self.center_size_lbl.config(text=str(size))
         self.center_color_swatch.config(bg=self._crosshair_color())
+        self.aim_sens_lbl.config(text=f"{self.aim_sens_var.get():.2f}")
         if not self.center_mode:
             return
         sw = self.root.winfo_screenwidth()
@@ -919,8 +932,14 @@ class App:
                 return
             offset_px = int(round(self.offset_var.get() * self._px_per_cm()))
             self._active_mode = "track"
+            # In Center mode the crosshair sits at screen center, so drive the aim with relative
+            # raw-input movement (works in games that ignore cursor positioning). Otherwise move
+            # the real OS cursor onto the color (windowed/desktop).
             self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
-                              mode="track", offset_px=offset_px)
+                              mode="track", offset_px=offset_px,
+                              aim=self.center_mode, sensitivity=self.aim_sens_var.get())
+            if self.center_mode:
+                self._set_status("Aim lock on — pulling onto the color.")
             self._refresh_buttons()
 
         self._require_license(proceed)

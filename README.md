@@ -33,6 +33,8 @@ py app.py
    - **Center size** slider — how big the watched box is (the + scales with it).
    - **Crosshair color** slider — pick any hue for the +.
    - **Hide crosshair** button — hides/shows the + without leaving Center mode.
+   - **Aim strength** slider — how hard Lock pulls the aim onto the color in games (see
+     [Lock](#lock-cursor-tracking-no-clicking) below).
    The crosshair is click-through and hidden from the color scanner, so it never interferes
    with clicking or matching. Press **Center** again to remove the crosshair and turn the mode
    off (picking a region manually also turns it off).
@@ -61,6 +63,22 @@ to release the cursor. Lock and Start/Stop are mutually exclusive — only one c
 - Because Lock actively moves the mouse, clicking the **Lock** button with your own cursor
   while it's already engaged can race with the tracking loop — **F8 is the reliable way to
   disengage it**.
+
+### Lock in games (Center mode)
+
+On a normal desktop window (say a video in a browser) Lock moves the real mouse cursor onto the
+color. That won't work in most games: they read the mouse as raw relative movement and ignore
+the OS cursor position, so the cursor never actually reaches the color.
+
+When Lock is engaged **while Center mode is on**, it instead injects relative mouse movement to
+pull the aim (fixed at the center crosshair) toward the color — which games *do* respond to.
+Set it up like this: turn on **Center**, size the box over your in-game crosshair, pick the
+target color, tune **Aim strength** (start low and raise it until the aim tracks without
+overshooting), then press **Lock**. Press **F8** to disengage.
+
+> Note: some online games' anti-cheat systems detect injected mouse input, and using it may
+> violate a game's terms of service. Use this where you're allowed to (single-player,
+> accessibility, your own projects).
 
 ## Binds
 
