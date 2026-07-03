@@ -28,6 +28,11 @@ py app.py
      pixel and its RGB/hex), then click to sample that color.
    - **Palette…** — a standard color picker / hex box.
 3. **Select region…** — the screen freezes; drag a box around the area to watch.
+   Or press **Center** instead: no region needed — it watches an 80×80 box in the exact middle
+   of the screen and shows a red crosshair there so you know where. The crosshair is
+   click-through and its arms sit outside the scan box, so it never interferes with clicking or
+   color matching. Press **Center** again to remove the crosshair and turn the mode off
+   (picking a region manually also turns it off).
 4. Adjust:
    - **Color tolerance** — how far each R/G/B channel may drift from your color (0 = exact
      match; a pixel matches only when *all three* channels are within the tolerance). Bump this

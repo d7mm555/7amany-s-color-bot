@@ -99,6 +99,8 @@ def action_label(action):
 
 
 class App:
+    CENTER_BOX = 80   # size (px) of the scan box "Center" mode watches in the screen middle
+
     def __init__(self, root):
         self.root = root
         self.color = None                 # (r, g, b)
@@ -113,6 +115,8 @@ class App:
         self.color_action = ("mouse", mouse.Button.left)   # what click mode fires on the color
         self._awaiting_action = False
         self._action_mouse_listener = None
+        self.center_mode = False
+        self._crosshair = None            # Toplevel overlay marking the screen center
         self.licensed = licensing.is_licensed()
         self.update_available = False
 
@@ -259,7 +263,16 @@ class App:
         self.region_var = tk.StringVar(value="not set")
         tk.Label(frm, textvariable=self.region_var, bg=PANEL_BG, fg=TEXT_MUTED, width=26, anchor="w"
                 ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
-        make_button(frm, "Select region…", self.pick_region).grid(row=3, column=2, sticky="w", **pad)
+        rbtns = tk.Frame(frm, bg=PANEL_BG)
+        rbtns.grid(row=3, column=2, sticky="w", **pad)
+        make_button(rbtns, "Select region…", self.pick_region).grid(row=0, column=0, padx=2)
+        # Plain tk.Button (no hover rebind) so its background can show an "active" state.
+        self.center_btn = tk.Button(
+            rbtns, text="Center", command=self.toggle_center,
+            bg=PURPLE_DARK, fg=TEXT, activebackground=PURPLE, activeforeground=TEXT,
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+        )
+        self.center_btn.grid(row=0, column=1, padx=2)
 
         # --- Tolerance ---
         self.tol_var = tk.IntVar(value=30)
@@ -514,10 +527,95 @@ class App:
         finally:
             self._show_self()
         if region:
+            if self.center_mode:
+                self._disable_center_mode()   # a hand-picked region replaces Center mode
             self.region = region
             self.region_var.set(
                 f"{region['width']}×{region['height']} @ ({region['left']},{region['top']})")
             self._set_status("Region selected.")
+
+    # ----- center mode (watch the middle of the screen, marked by a crosshair) -----
+    def toggle_center(self):
+        if self.center_mode:
+            self._disable_center_mode()
+            self.region = None
+            self.region_var.set("not set")
+            self._set_status("Center mode off — crosshair removed.")
+            return
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        half = self.CENTER_BOX // 2
+        self.region = {"left": sw // 2 - half, "top": sh // 2 - half,
+                       "width": self.CENTER_BOX, "height": self.CENTER_BOX}
+        self.center_mode = True
+        self.center_btn.config(bg=PURPLE)
+        self.region_var.set(f"Center of screen ({self.CENTER_BOX}×{self.CENTER_BOX})")
+        self._show_crosshair()
+        self._set_status("Center mode on — watching the middle of the screen.")
+
+    def _disable_center_mode(self):
+        self.center_mode = False
+        self.center_btn.config(bg=PURPLE_DARK)
+        self._hide_crosshair()
+
+    def _show_crosshair(self):
+        if self._crosshair is not None:
+            return
+        size = 220
+        half_box = self.CENTER_BOX // 2
+        gap = half_box + 8                 # crosshair arms start OUTSIDE the scan box…
+        arm = 30                           # …so their pixels can never match the target color
+        color = "#FF3131"
+        transparent = "#010203"            # transparency key; everything this color is see-through
+
+        ch = tk.Toplevel(self.root)
+        ch.overrideredirect(True)
+        ch.attributes("-topmost", True)
+        ch.configure(bg=transparent)
+        ch.attributes("-transparentcolor", transparent)
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        ch.geometry(f"{size}x{size}+{sw // 2 - size // 2}+{sh // 2 - size // 2}")
+
+        cv = tk.Canvas(ch, width=size, height=size, bg=transparent, highlightthickness=0)
+        cv.pack()
+        c = size // 2
+        cv.create_line(c - gap - arm, c, c - gap, c, fill=color, width=2)
+        cv.create_line(c + gap, c, c + gap + arm, c, fill=color, width=2)
+        cv.create_line(c, c - gap - arm, c, c - gap, fill=color, width=2)
+        cv.create_line(c, c + gap, c, c + gap + arm, fill=color, width=2)
+        # corner ticks marking the actual scan box (drawn just outside its border)
+        b = half_box + 3
+        t = 10
+        for dx in (-1, 1):
+            for dy in (-1, 1):
+                cv.create_line(c + dx * b, c + dy * b, c + dx * (b - t), c + dy * b, fill=color)
+                cv.create_line(c + dx * b, c + dy * b, c + dx * b, c + dy * (b - t), fill=color)
+
+        # Make the overlay click-through (input passes to whatever is underneath) and — where
+        # Windows supports it — invisible to screen capture, so the scan can never see it.
+        ch.update_idletasks()
+        try:
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            WDA_EXCLUDEFROMCAPTURE = 0x11
+            hwnd = ctypes.windll.user32.GetParent(ch.winfo_id()) or ch.winfo_id()
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                                style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        except Exception:
+            pass
+        self._crosshair = ch
+
+    def _hide_crosshair(self):
+        if self._crosshair is not None:
+            try:
+                self._crosshair.destroy()
+            except Exception:
+                pass
+            self._crosshair = None
 
     # ----- licensing -----
     def _update_token_visibility(self):
