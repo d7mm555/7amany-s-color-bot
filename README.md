@@ -28,11 +28,14 @@ py app.py
      pixel and its RGB/hex), then click to sample that color.
    - **Palette…** — a standard color picker / hex box.
 3. **Select region…** — the screen freezes; drag a box around the area to watch.
-   Or press **Center** instead: no region needed — it watches an 80×80 box in the exact middle
-   of the screen and shows a red crosshair there so you know where. The crosshair is
-   click-through and its arms sit outside the scan box, so it never interferes with clicking or
-   color matching. Press **Center** again to remove the crosshair and turn the mode off
-   (picking a region manually also turns it off).
+   Or press **Center** instead: no region needed — it watches a box in the exact middle of the
+   screen, marked by a **+** crosshair. While Center is on, extra controls appear under it:
+   - **Center size** slider — how big the watched box is (the + scales with it).
+   - **Crosshair color** slider — pick any hue for the +.
+   - **Hide crosshair** button — hides/shows the + without leaving Center mode.
+   The crosshair is click-through and hidden from the color scanner, so it never interferes
+   with clicking or matching. Press **Center** again to remove the crosshair and turn the mode
+   off (picking a region manually also turns it off).
 4. Adjust:
    - **Color tolerance** — how far each R/G/B channel may drift from your color (0 = exact
      match; a pixel matches only when *all three* channels are within the tolerance). Bump this
@@ -61,13 +64,17 @@ to release the cursor. Lock and Start/Stop are mutually exclusive — only one c
 
 ## Binds
 
-Two white bind boxes sit under the token box:
+Three white bind boxes sit under the token box:
 
 - **On color: …** — what input fires when the color is seen in click mode. Click it, then press
   any mouse button (left/right/middle/…) or keyboard key. Press **Esc** while it says
   "Press mouse button or key…" to cancel.
 - **Hotkey: …** — press any key to make it toggle Start/Stop from anywhere (like F8, but
   bindable to a key of your choice). Press **Esc** while it says "Select key…" to cancel.
+- **Hold: …** — press any key to bind it as a *hold-to-run* trigger: while you keep that key
+  held down, the bound action fires whenever the color is in the region; the moment you let
+  go, everything stops. No countdown delay applies. Press **Esc** during "Select key…" to
+  cancel.
 
 ## Fullscreen & navigation
 

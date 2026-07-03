@@ -117,6 +117,12 @@ class App:
         self._action_mouse_listener = None
         self.center_mode = False
         self._crosshair = None            # Toplevel overlay marking the screen center
+        self._crosshair_hidden = False
+        self._ch_canvas = None
+        self._ch_h = self._ch_v = None    # the two lines of the "+" crosshair
+        self.hold_key = None              # key that runs click mode only while held down
+        self._awaiting_hold = False
+        self._hold_active = False
         self.licensed = licensing.is_licensed()
         self.update_available = False
 
@@ -140,7 +146,7 @@ class App:
 
         # Global F8 hotkey — stop even when this window isn't focused. Also captures the
         # next keypress when a keybind is being recorded, and fires the bound hotkey.
-        self._listener = keyboard.Listener(on_press=self._on_key)
+        self._listener = keyboard.Listener(on_press=self._on_key, on_release=self._on_key_release)
         self._listener.daemon = True
         self._listener.start()
 
@@ -274,30 +280,57 @@ class App:
         )
         self.center_btn.grid(row=0, column=1, padx=2)
 
+        # --- Center mode options (only visible while Center is on) ---
+        self.center_frame = tk.Frame(frm, bg=PANEL_BG)
+        self.center_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10)
+        self.center_size_var = tk.IntVar(value=self.CENTER_BOX)
+        tk.Label(self.center_frame, text="Center size", bg=PANEL_BG, fg=TEXT).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        tk.Scale(self.center_frame, from_=20, to=300, variable=self.center_size_var,
+                 orient="horizontal", command=lambda _v: self._apply_center_options(),
+                 bg=PANEL_BG, fg=TEXT, troughcolor=PURPLE_DARKER, activebackground=PURPLE,
+                 highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False, length=160
+                 ).grid(row=0, column=1, sticky="ew")
+        self.center_size_lbl = tk.Label(self.center_frame, width=4, bg=PANEL_BG, fg=TEXT)
+        self.center_size_lbl.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        self.center_hue_var = tk.IntVar(value=0)
+        tk.Label(self.center_frame, text="Crosshair color", bg=PANEL_BG, fg=TEXT).grid(
+            row=1, column=0, sticky="w", padx=(0, 8))
+        tk.Scale(self.center_frame, from_=0, to=359, variable=self.center_hue_var,
+                 orient="horizontal", command=lambda _v: self._apply_center_options(),
+                 bg=PANEL_BG, fg=TEXT, troughcolor=PURPLE_DARKER, activebackground=PURPLE,
+                 highlightthickness=0, bd=0, sliderrelief="flat", showvalue=False, length=160
+                 ).grid(row=1, column=1, sticky="ew")
+        self.center_color_swatch = tk.Label(self.center_frame, width=3, bg="#FF0000")
+        self.center_color_swatch.grid(row=1, column=2, sticky="w", padx=(6, 0))
+        self.hide_ch_btn = make_button(self.center_frame, "Hide crosshair", self._toggle_crosshair_visible)
+        self.hide_ch_btn.grid(row=2, column=0, columnspan=3, pady=(4, 2))
+        self.center_frame.grid_remove()
+
         # --- Tolerance ---
         self.tol_var = tk.IntVar(value=30)
-        tk.Label(frm, text="Color tolerance", bg=PANEL_BG, fg=TEXT).grid(row=4, column=0, sticky="w", **pad)
-        self._make_scale(frm, 0, 150, self.tol_var).grid(row=4, column=1, sticky="ew", **pad)
+        tk.Label(frm, text="Color tolerance", bg=PANEL_BG, fg=TEXT).grid(row=5, column=0, sticky="w", **pad)
+        self._make_scale(frm, 0, 150, self.tol_var).grid(row=5, column=1, sticky="ew", **pad)
         self.tol_lbl = tk.Label(frm, width=4, bg=PANEL_BG, fg=TEXT)
-        self.tol_lbl.grid(row=4, column=2, sticky="w", **pad)
+        self.tol_lbl.grid(row=5, column=2, sticky="w", **pad)
 
         # --- Click interval ---
         self.interval_var = tk.IntVar(value=200)
-        tk.Label(frm, text="Click interval (ms)", bg=PANEL_BG, fg=TEXT).grid(row=5, column=0, sticky="w", **pad)
-        self._make_scale(frm, 50, 1000, self.interval_var).grid(row=5, column=1, sticky="ew", **pad)
+        tk.Label(frm, text="Click interval (ms)", bg=PANEL_BG, fg=TEXT).grid(row=6, column=0, sticky="w", **pad)
+        self._make_scale(frm, 50, 1000, self.interval_var).grid(row=6, column=1, sticky="ew", **pad)
         self.int_lbl = tk.Label(frm, width=5, bg=PANEL_BG, fg=TEXT)
-        self.int_lbl.grid(row=5, column=2, sticky="w", **pad)
+        self.int_lbl.grid(row=6, column=2, sticky="w", **pad)
 
         # --- Start delay ---
         self.delay_var = tk.IntVar(value=3)
-        tk.Label(frm, text="Start delay (s)", bg=PANEL_BG, fg=TEXT).grid(row=6, column=0, sticky="w", **pad)
-        self._make_scale(frm, 0, 10, self.delay_var).grid(row=6, column=1, sticky="ew", **pad)
+        tk.Label(frm, text="Start delay (s)", bg=PANEL_BG, fg=TEXT).grid(row=7, column=0, sticky="w", **pad)
+        self._make_scale(frm, 0, 10, self.delay_var).grid(row=7, column=1, sticky="ew", **pad)
         self.delay_lbl = tk.Label(frm, width=4, bg=PANEL_BG, fg=TEXT)
-        self.delay_lbl.grid(row=6, column=2, sticky="w", **pad)
+        self.delay_lbl.grid(row=7, column=2, sticky="w", **pad)
 
         # --- Start / Stop ---
         actions = tk.Frame(frm, bg=PANEL_BG)
-        actions.grid(row=7, column=0, columnspan=3, pady=(10, 4))
+        actions.grid(row=8, column=0, columnspan=3, pady=(10, 4))
         self.start_btn = make_button(actions, "▶  Start", self.start)
         self.start_btn.grid(row=0, column=0, padx=6)
         self.stop_btn = make_button(actions, "■  Stop (F8)", self.stop)
@@ -306,7 +339,7 @@ class App:
 
         # --- Token (shown right below Start/Stop until a token is redeemed) ---
         self.token_frame = tk.Frame(frm, bg=PANEL_BG)
-        self.token_frame.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=10)
+        self.token_frame.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=10)
         tk.Label(self.token_frame, text="Enter Token", bg=PANEL_BG, fg=TEXT).pack(side="left", padx=(0, 8))
         self.token_var = tk.StringVar()
         tk.Entry(self.token_frame, textvariable=self.token_var, bg="white", fg="black",
@@ -314,11 +347,12 @@ class App:
         self.token_error_var = tk.StringVar(value="")
         self.token_error_lbl = tk.Label(frm, textvariable=self.token_error_var, bg=PANEL_BG, fg=RED,
                                         font=("Segoe UI", 9, "bold"))
-        self.token_error_lbl.grid(row=9, column=0, columnspan=3, sticky="w", padx=10)
+        self.token_error_lbl.grid(row=10, column=0, columnspan=3, sticky="w", padx=10)
 
-        # --- Binds: what to fire on the color (click mode) + hotkey that toggles Start/Stop ---
+        # --- Binds: what to fire on the color (click mode) + hotkey that toggles Start/Stop
+        #     + hold key that runs click mode only while held down ---
         binds = tk.Frame(frm, bg=PANEL_BG)
-        binds.grid(row=10, column=0, columnspan=3, pady=(10, 8))
+        binds.grid(row=11, column=0, columnspan=3, pady=(10, 8))
         self.action_btn = tk.Button(
             binds, text=f"On color: {action_label(self.color_action)}",
             command=self._start_action_capture,
@@ -332,37 +366,44 @@ class App:
             relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
         )
         self.bind_btn.grid(row=0, column=1, padx=4)
+        self.hold_btn = tk.Button(
+            binds, text="Hold: None", command=self._start_hold_capture,
+            bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+        )
+        self.hold_btn.grid(row=0, column=2, padx=4)
 
         # --- Lock ---
         self.lock_btn = tk.Button(
             frm, text="Lock: OFF", command=self._toggle_lock,
             relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=8,
         )
-        self.lock_btn.grid(row=11, column=0, columnspan=3, pady=(0, 4))
+        self.lock_btn.grid(row=12, column=0, columnspan=3, pady=(0, 4))
 
         # --- Offset (Lock only) ---
         self.offset_var = tk.DoubleVar(value=0.0)
-        tk.Label(frm, text="Offset (cm)", bg=PANEL_BG, fg=TEXT).grid(row=12, column=0, sticky="w", **pad)
+        tk.Label(frm, text="Offset (cm)", bg=PANEL_BG, fg=TEXT).grid(row=13, column=0, sticky="w", **pad)
         self._make_scale(frm, -0.6, 0.6, self.offset_var, resolution=0.01).grid(
-            row=12, column=1, sticky="ew", **pad)
+            row=13, column=1, sticky="ew", **pad)
         self.offset_lbl = tk.Label(frm, width=6, bg=PANEL_BG, fg=TEXT)
-        self.offset_lbl.grid(row=12, column=2, sticky="w", **pad)
+        self.offset_lbl.grid(row=13, column=2, sticky="w", **pad)
 
         # --- Status ---
         self.status_var = tk.StringVar(value="Set a color and a region, then Start.")
         sep = tk.Frame(frm, bg=BORDER, height=1)
-        sep.grid(row=13, column=0, columnspan=3, sticky="ew", pady=6)
+        sep.grid(row=14, column=0, columnspan=3, sticky="ew", pady=6)
         self.status_lbl = tk.Label(frm, textvariable=self.status_var, bg=PANEL_BG, fg=PURPLE_BRIGHT,
                                    width=40, anchor="w", justify="left")
-        self.status_lbl.grid(row=14, column=0, columnspan=3, sticky="w", **pad)
+        self.status_lbl.grid(row=15, column=0, columnspan=3, sticky="w", **pad)
         tk.Label(frm, text="Emergency stop: F8  (global)", bg=PANEL_BG, fg=TEXT_MUTED).grid(
-            row=15, column=0, columnspan=3, sticky="w", padx=10)
+            row=16, column=0, columnspan=3, sticky="w", padx=10)
 
         footer = tk.Frame(parent, bg=BG)
         footer.pack(fill="x", padx=16, pady=(0, 14))
         make_button(footer, "← Back", self._back_to_splash).pack(side="left")
 
         self._sync_labels()
+        self._apply_center_options()
         self._refresh_buttons()
 
     def _make_scale(self, parent, lo, hi, var, resolution=1):
@@ -430,6 +471,20 @@ class App:
             else:
                 self.root.after(0, lambda: self._finish_bind(key))
             return
+        if self._awaiting_hold:
+            if key == keyboard.Key.esc:
+                self.root.after(0, self._cancel_hold_capture)
+            else:
+                self.root.after(0, lambda: self._finish_hold_bind(key))
+            return
+        if self.hold_key is not None and key == self.hold_key:
+            # Key auto-repeat fires repeated presses while held — only the first one starts.
+            # Don't hijack a run that Start/Lock already owns.
+            if (not self._hold_active and not self.worker.is_running()
+                    and self._countdown_job is None):
+                self._hold_active = True
+                self.root.after(0, self._hold_start)
+            return
         if key == keyboard.Key.esc:
             # Route through the global listener rather than relying solely on the Tk <Escape>
             # binding — that binding needs a focused Tk widget, which a borderless fullscreen
@@ -442,8 +497,15 @@ class App:
         if self.bound_key is not None and key == self.bound_key:
             self.root.after(0, self._toggle_run)
 
+    def _on_key_release(self, key):
+        if self._hold_active and self.hold_key is not None and key == self.hold_key:
+            self._hold_active = False
+            self.root.after(0, self.stop)
+
     # ----- keybind -----
     def _start_bind_capture(self):
+        if self._awaiting_action or self._awaiting_hold:
+            return
         self._awaiting_bind = True
         self.bind_btn.config(text="Select key…")
 
@@ -458,7 +520,7 @@ class App:
 
     # ----- color-action bind (what click mode fires when it sees the color) -----
     def _start_action_capture(self):
-        if self._awaiting_action or self._awaiting_bind:
+        if self._awaiting_action or self._awaiting_bind or self._awaiting_hold:
             return
         self._awaiting_action = True
         self.action_btn.config(text="Press mouse button or key…")
@@ -489,6 +551,47 @@ class App:
         if action is not None:
             self.color_action = action
         self.action_btn.config(text=f"On color: {action_label(self.color_action)}")
+
+    # ----- hold bind (click mode runs only while this key is held down) -----
+    def _start_hold_capture(self):
+        if self._awaiting_action or self._awaiting_bind or self._awaiting_hold:
+            return
+        self._awaiting_hold = True
+        self.hold_btn.config(text="Select key…")
+
+    def _cancel_hold_capture(self):
+        self._awaiting_hold = False
+        self.hold_btn.config(text=f"Hold: {key_label(self.hold_key)}")
+
+    def _finish_hold_bind(self, key):
+        self._awaiting_hold = False
+        self.hold_key = key
+        self.hold_btn.config(text=f"Hold: {key_label(key)}")
+
+    def _hold_start(self):
+        """Begin click mode while the hold key stays down. No countdown — holding a key
+        already means "now". Releasing the key stops it (see _on_key_release)."""
+        if self.worker.is_running() or self._countdown_job is not None:
+            return
+        if self.update_available:
+            self.token_error_var.set("Update Required")
+            return
+
+        def proceed():
+            if not self._hold_active:
+                return   # key was released while the license check was still running
+            if self.color is None:
+                self._set_status("Pick a target color first.")
+                return
+            if self.region is None:
+                self._set_status("Select a scan region first.")
+                return
+            self._active_mode = "click"
+            self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
+                              mode="click", action=self.color_action)
+            self._refresh_buttons()
+
+        self._require_license(proceed)
 
     def _toggle_run(self):
         if self.worker.is_running() or self._countdown_job is not None:
@@ -534,7 +637,9 @@ class App:
                 f"{region['width']}×{region['height']} @ ({region['left']},{region['top']})")
             self._set_status("Region selected.")
 
-    # ----- center mode (watch the middle of the screen, marked by a crosshair) -----
+    # ----- center mode (watch the middle of the screen, marked by a "+" crosshair) -----
+    CH_WIN = 320   # crosshair overlay window size; big enough for the largest Center size
+
     def toggle_center(self):
         if self.center_mode:
             self._disable_center_mode()
@@ -542,32 +647,44 @@ class App:
             self.region_var.set("not set")
             self._set_status("Center mode off — crosshair removed.")
             return
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        half = self.CENTER_BOX // 2
-        self.region = {"left": sw // 2 - half, "top": sh // 2 - half,
-                       "width": self.CENTER_BOX, "height": self.CENTER_BOX}
         self.center_mode = True
         self.center_btn.config(bg=PURPLE)
-        self.region_var.set(f"Center of screen ({self.CENTER_BOX}×{self.CENTER_BOX})")
+        self.center_frame.grid()
         self._show_crosshair()
+        self._apply_center_options()   # sets self.region + label from the size slider
         self._set_status("Center mode on — watching the middle of the screen.")
 
     def _disable_center_mode(self):
         self.center_mode = False
         self.center_btn.config(bg=PURPLE_DARK)
+        self.center_frame.grid_remove()
         self._hide_crosshair()
+        self._crosshair_hidden = False
+        self.hide_ch_btn.config(text="Hide crosshair")
+
+    def _crosshair_color(self):
+        r, g, b = colorsys.hsv_to_rgb(self.center_hue_var.get() / 360.0, 1.0, 1.0)
+        return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+    def _apply_center_options(self):
+        """Live handler for the Center size / crosshair color sliders."""
+        size = self.center_size_var.get()
+        self.center_size_lbl.config(text=str(size))
+        self.center_color_swatch.config(bg=self._crosshair_color())
+        if not self.center_mode:
+            return
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        half = size // 2
+        self.region = {"left": sw // 2 - half, "top": sh // 2 - half,
+                       "width": size, "height": size}
+        self.region_var.set(f"Center of screen ({size}×{size})")
+        self._redraw_crosshair()
 
     def _show_crosshair(self):
         if self._crosshair is not None:
             return
-        size = 220
-        half_box = self.CENTER_BOX // 2
-        gap = half_box + 8                 # crosshair arms start OUTSIDE the scan box…
-        arm = 30                           # …so their pixels can never match the target color
-        color = "#FF3131"
         transparent = "#010203"            # transparency key; everything this color is see-through
-
         ch = tk.Toplevel(self.root)
         ch.overrideredirect(True)
         ch.attributes("-topmost", True)
@@ -575,25 +692,36 @@ class App:
         ch.attributes("-transparentcolor", transparent)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        ch.geometry(f"{size}x{size}+{sw // 2 - size // 2}+{sh // 2 - size // 2}")
-
-        cv = tk.Canvas(ch, width=size, height=size, bg=transparent, highlightthickness=0)
+        ch.geometry(f"{self.CH_WIN}x{self.CH_WIN}"
+                    f"+{sw // 2 - self.CH_WIN // 2}+{sh // 2 - self.CH_WIN // 2}")
+        cv = tk.Canvas(ch, width=self.CH_WIN, height=self.CH_WIN, bg=transparent,
+                       highlightthickness=0)
         cv.pack()
-        c = size // 2
-        cv.create_line(c - gap - arm, c, c - gap, c, fill=color, width=2)
-        cv.create_line(c + gap, c, c + gap + arm, c, fill=color, width=2)
-        cv.create_line(c, c - gap - arm, c, c - gap, fill=color, width=2)
-        cv.create_line(c, c + gap, c, c + gap + arm, fill=color, width=2)
-        # corner ticks marking the actual scan box (drawn just outside its border)
-        b = half_box + 3
-        t = 10
-        for dx in (-1, 1):
-            for dy in (-1, 1):
-                cv.create_line(c + dx * b, c + dy * b, c + dx * (b - t), c + dy * b, fill=color)
-                cv.create_line(c + dx * b, c + dy * b, c + dx * b, c + dy * (b - t), fill=color)
+        self._ch_canvas = cv
+        self._ch_h = cv.create_line(0, 0, 0, 0, width=2)
+        self._ch_v = cv.create_line(0, 0, 0, 0, width=2)
+        self._apply_crosshair_window_styles(ch)
+        self._crosshair = ch
+        self._redraw_crosshair()
+        if self._crosshair_hidden:
+            ch.withdraw()
 
-        # Make the overlay click-through (input passes to whatever is underneath) and — where
-        # Windows supports it — invisible to screen capture, so the scan can never see it.
+    def _redraw_crosshair(self):
+        """Size the "+" to span the scan box and apply the chosen color."""
+        if self._crosshair is None:
+            return
+        c = self.CH_WIN // 2
+        half = self.center_size_var.get() // 2
+        color = self._crosshair_color()
+        self._ch_canvas.coords(self._ch_h, c - half, c, c + half, c)
+        self._ch_canvas.coords(self._ch_v, c, c - half, c, c + half)
+        self._ch_canvas.itemconfig(self._ch_h, fill=color)
+        self._ch_canvas.itemconfig(self._ch_v, fill=color)
+
+    def _apply_crosshair_window_styles(self, ch):
+        """Make the overlay click-through (input passes to whatever is underneath) and — where
+        Windows supports it — invisible to screen capture, so the color scan never sees the
+        crosshair's own pixels even though the "+" sits inside the scan box."""
         ch.update_idletasks()
         try:
             GWL_EXSTYLE = -20
@@ -607,7 +735,21 @@ class App:
             ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
         except Exception:
             pass
-        self._crosshair = ch
+
+    def _toggle_crosshair_visible(self):
+        """Hide/show the crosshair overlay without leaving Center mode."""
+        if self._crosshair is None:
+            return
+        if self._crosshair_hidden:
+            self._crosshair.deiconify()
+            self._crosshair.attributes("-topmost", True)
+            self._apply_crosshair_window_styles(self._crosshair)
+            self._crosshair_hidden = False
+            self.hide_ch_btn.config(text="Hide crosshair")
+        else:
+            self._crosshair.withdraw()
+            self._crosshair_hidden = True
+            self.hide_ch_btn.config(text="Show crosshair")
 
     def _hide_crosshair(self):
         if self._crosshair is not None:
@@ -616,6 +758,8 @@ class App:
             except Exception:
                 pass
             self._crosshair = None
+            self._ch_canvas = None
+            self._ch_h = self._ch_v = None
 
     # ----- licensing -----
     def _update_token_visibility(self):
