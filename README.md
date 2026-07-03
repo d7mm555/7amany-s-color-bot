@@ -29,12 +29,17 @@ py app.py
    - **Palette…** — a standard color picker / hex box.
 3. **Select region…** — the screen freezes; drag a box around the area to watch.
 4. Adjust:
-   - **Color tolerance** — how close a pixel must be to your color (0 = exact match, higher =
-     looser). Bump this up if a color has anti-aliasing/gradients.
-   - **Click interval (ms)** — how often it re-clicks / re-tracks while the color stays visible.
+   - **Color tolerance** — how far each R/G/B channel may drift from your color (0 = exact
+     match; a pixel matches only when *all three* channels are within the tolerance). Bump this
+     up if a color has anti-aliasing/gradients.
+   - **Click interval (ms)** — how often the action re-fires while the color stays visible
+     (click mode only; Lock tracks continuously on its own fast cadence).
    - **Start delay (s)** — countdown before Start begins, so you can get positioned.
 5. Enter a valid token (first run only — see [Licensing](#licensing)).
-6. Press **▶ Start** to auto-click, or **Lock** to track without clicking (see below).
+6. Optional: click **On color: Left Click** and press any mouse button or keyboard key — that
+   input is what fires on the color when you press Start (Esc cancels; default is left click).
+7. Press **▶ Start** to auto-fire the bound action, or **Lock** to track without clicking
+   (see below).
 
 ## Lock (cursor tracking, no clicking)
 
@@ -49,11 +54,15 @@ to release the cursor. Lock and Start/Stop are mutually exclusive — only one c
   while it's already engaged can race with the tracking loop — **F8 is the reliable way to
   disengage it**.
 
-## Custom keybind
+## Binds
 
-Click the white **Bind** box, then press any key — that key now toggles Start/Stop, from
-anywhere (like F8, but bindable to a key of your choice). Press **Esc** while it says
-"Select key…" to cancel without binding.
+Two white bind boxes sit under the token box:
+
+- **On color: …** — what input fires when the color is seen in click mode. Click it, then press
+  any mouse button (left/right/middle/…) or keyboard key. Press **Esc** while it says
+  "Press mouse button or key…" to cancel.
+- **Hotkey: …** — press any key to make it toggle Start/Stop from anywhere (like F8, but
+  bindable to a key of your choice). Press **Esc** while it says "Select key…" to cancel.
 
 ## Fullscreen & navigation
 
@@ -82,9 +91,10 @@ successfully.
 ## Notes / limitations
 
 - Works on the **primary monitor**.
-- It clicks/tracks the pixel nearest the *median* of all matching pixels (a robust center),
-  snapped to a pixel that actually matches — so it lands on the color, not an empty gap between
-  blobs.
+- On first sighting it targets the pixel nearest the *median* of all matching pixels (a robust
+  center), snapped to a pixel that actually matches — so it lands on the color, not an empty
+  gap between blobs. While Lock holds a target it follows the nearest matching pixel frame to
+  frame with light motion smoothing, so the cursor glides instead of jittering.
 - The process is set **DPI-aware** so clicks and the cm-based offset land accurately on scaled/
   high-DPI displays.
 - Single target color per session. Ask if you want multiple colors, per-color actions, or

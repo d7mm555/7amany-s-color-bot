@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import colorchooser
 
-from pynput import keyboard
+from pynput import keyboard, mouse
 
 import licensing
 import overlays
@@ -89,6 +89,15 @@ def key_label(key):
     return str(key).replace("Key.", "").upper()
 
 
+def action_label(action):
+    """Human label for a color-action: ("mouse", Button) or ("key", key)."""
+    kind, value = action
+    if kind == "mouse":
+        name = getattr(value, "name", str(value))
+        return f"{name.title()} Click"
+    return f"Key {key_label(value)}"
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -101,6 +110,9 @@ class App:
         self._is_fullscreen = False
         self.bound_key = None
         self._awaiting_bind = False
+        self.color_action = ("mouse", mouse.Button.left)   # what click mode fires on the color
+        self._awaiting_action = False
+        self._action_mouse_listener = None
         self.licensed = licensing.is_licensed()
         self.update_available = False
 
@@ -291,13 +303,22 @@ class App:
                                         font=("Segoe UI", 9, "bold"))
         self.token_error_lbl.grid(row=9, column=0, columnspan=3, sticky="w", padx=10)
 
-        # --- Bind (custom hotkey that toggles Start/Stop) ---
-        self.bind_btn = tk.Button(
-            frm, text="Bind: None", command=self._start_bind_capture,
+        # --- Binds: what to fire on the color (click mode) + hotkey that toggles Start/Stop ---
+        binds = tk.Frame(frm, bg=PANEL_BG)
+        binds.grid(row=10, column=0, columnspan=3, pady=(10, 8))
+        self.action_btn = tk.Button(
+            binds, text=f"On color: {action_label(self.color_action)}",
+            command=self._start_action_capture,
             bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
             relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
         )
-        self.bind_btn.grid(row=10, column=0, columnspan=3, pady=(10, 8))
+        self.action_btn.grid(row=0, column=0, padx=4)
+        self.bind_btn = tk.Button(
+            binds, text="Hotkey: None", command=self._start_bind_capture,
+            bg="white", fg="black", activebackground="#eeeeee", activeforeground="black",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+        )
+        self.bind_btn.grid(row=0, column=1, padx=4)
 
         # --- Lock ---
         self.lock_btn = tk.Button(
@@ -384,6 +405,12 @@ class App:
             self.lock_btn.config(state="normal", bg=PURPLE_DARK, fg=TEXT, text="Lock: OFF")
 
     def _on_key(self, key):
+        if self._awaiting_action:
+            if key == keyboard.Key.esc:
+                self.root.after(0, lambda: self._finish_action_bind(None))
+            else:
+                self.root.after(0, lambda: self._finish_action_bind(("key", key)))
+            return
         if self._awaiting_bind:
             if key == keyboard.Key.esc:
                 self.root.after(0, self._cancel_bind_capture)
@@ -409,12 +436,46 @@ class App:
 
     def _cancel_bind_capture(self):
         self._awaiting_bind = False
-        self.bind_btn.config(text=f"Bind: {key_label(self.bound_key)}")
+        self.bind_btn.config(text=f"Hotkey: {key_label(self.bound_key)}")
 
     def _finish_bind(self, key):
         self._awaiting_bind = False
         self.bound_key = key
-        self.bind_btn.config(text=f"Bind: {key_label(key)}")
+        self.bind_btn.config(text=f"Hotkey: {key_label(key)}")
+
+    # ----- color-action bind (what click mode fires when it sees the color) -----
+    def _start_action_capture(self):
+        if self._awaiting_action or self._awaiting_bind:
+            return
+        self._awaiting_action = True
+        self.action_btn.config(text="Press mouse button or key…")
+        # Arm the mouse listener after a short delay so the left click that pressed this very
+        # button isn't captured as the chosen action.
+        self.root.after(250, self._arm_action_mouse_listener)
+
+    def _arm_action_mouse_listener(self):
+        if not self._awaiting_action:
+            return
+        self._action_mouse_listener = mouse.Listener(on_click=self._on_action_mouse)
+        self._action_mouse_listener.daemon = True
+        self._action_mouse_listener.start()
+
+    def _on_action_mouse(self, x, y, button, pressed):
+        if pressed and self._awaiting_action:
+            self.root.after(0, lambda: self._finish_action_bind(("mouse", button)))
+
+    def _finish_action_bind(self, action):
+        """action=None cancels and keeps the previous binding."""
+        self._awaiting_action = False
+        if self._action_mouse_listener is not None:
+            try:
+                self._action_mouse_listener.stop()
+            except Exception:
+                pass
+            self._action_mouse_listener = None
+        if action is not None:
+            self.color_action = action
+        self.action_btn.config(text=f"On color: {action_label(self.color_action)}")
 
     def _toggle_run(self):
         if self.worker.is_running() or self._countdown_job is not None:
@@ -584,7 +645,7 @@ class App:
     def _launch(self):
         self._active_mode = "click"
         self.worker.start(self.color, self.region, self.tol_var.get(), self.interval_var.get(),
-                          mode="click")
+                          mode="click", action=self.color_action)
         self._refresh_buttons()
 
     def stop(self):
@@ -628,6 +689,11 @@ class App:
             self._listener.stop()
         except Exception:
             pass
+        if self._action_mouse_listener is not None:
+            try:
+                self._action_mouse_listener.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
 
