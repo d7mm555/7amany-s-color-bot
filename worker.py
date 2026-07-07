@@ -95,6 +95,11 @@ class ClickWorker:
     # Aim mode (games): per-tick relative-move clamp and on-target deadzone, both in pixels.
     AIM_MAX_STEP = 50
     AIM_DEADZONE = 2.0
+    # Aim target smoothing: same idea as SMOOTH_ALPHA, applied to the *measured* target point
+    # before the sensitivity gain, not to the sent deltas. Without this, per-frame mask noise
+    # (compression artifacts, multiple blobs, anti-aliased edges) feeds straight into SendInput
+    # and reads as a jittery/choppy aim; filtering the point first makes the pull smooth.
+    AIM_SMOOTH_ALPHA = 0.35
 
     def __init__(self, on_status=None):
         self.on_status = on_status
@@ -170,6 +175,11 @@ class ClickWorker:
         # In region coords, for picking the matched pixel nearest the crosshair while aiming.
         cxr = region["width"] / 2.0
         cyr = region["height"] / 2.0
+        # Aim-mode state: last locked pixel (region coords, for frame-to-frame continuity, same
+        # idea as lock_pt) and a float "measured target" that's smoothed before the aim gain is
+        # applied (same idea as vx/vy).
+        aim_lock_pt = None
+        avx = avy = None
         try:
             with mss.mss() as sct:
                 while not self._stop.is_set():
@@ -180,8 +190,14 @@ class ClickWorker:
                     mask = (np.abs(rgb - target) <= tolerance).all(axis=2)
                     ys, xs = np.nonzero(mask)
                     if xs.size:
-                        if mode == "track" and aim:
-                            # Aim: lock onto the target nearest the crosshair (screen center).
+                        if mode == "track" and aim and aim_lock_pt is not None:
+                            # Continuity: follow the matched pixel nearest to the one we were
+                            # already tracking, not the one nearest the crosshair every frame —
+                            # otherwise the aim hops between blobs (e.g. separate limbs) and
+                            # jitters instead of smoothly pulling onto one point.
+                            idx = np.argmin((xs - aim_lock_pt[0]) ** 2 + (ys - aim_lock_pt[1]) ** 2)
+                        elif mode == "track" and aim:
+                            # Fresh acquisition: lock onto the target nearest the crosshair.
                             idx = np.argmin((xs - cxr) ** 2 + (ys - cyr) ** 2)
                         elif mode == "track" and lock_pt is not None:
                             # Continuity: follow the matched pixel nearest to where we already
@@ -198,7 +214,14 @@ class ClickWorker:
                         sx = region["left"] + px
                         sy = region["top"] + py
                         if mode == "track" and aim:
-                            dx, dy = aim_delta((sx + offset_px, sy), (cx, cy),
+                            aim_lock_pt = (px, py)
+                            raw_tx, raw_ty = float(sx + offset_px), float(sy)
+                            if avx is None:
+                                avx, avy = raw_tx, raw_ty     # fresh acquisition: no filter lag
+                            else:
+                                avx += (raw_tx - avx) * self.AIM_SMOOTH_ALPHA
+                                avy += (raw_ty - avy) * self.AIM_SMOOTH_ALPHA
+                            dx, dy = aim_delta((avx, avy), (cx, cy),
                                                sensitivity, self.AIM_MAX_STEP, self.AIM_DEADZONE)
                             if dx or dy:
                                 self._send_relative(dx, dy)
@@ -238,6 +261,8 @@ class ClickWorker:
                             lock_pt = None
                             vx = vy = None
                             last_set = None
+                            aim_lock_pt = None
+                            avx = avy = None
                             now = time.monotonic()
                             if now - last_status >= self.STATUS_MIN_INTERVAL:
                                 self._status("Locked  ·  waiting for color…")
